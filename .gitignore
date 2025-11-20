@@ -1,0 +1,15 @@
+# Dépendances (Lourds et réinstallables)
+node_modules/
+*/node_modules/
+
+# Build de production
+dist/
+build/
+
+# Fichiers d'environnement (Sécurité : Ne jamais envoyer les mots de passe !)
+.env
+*/.env
+
+# Logs et fichiers systèmes
+*.log
+.DS_Store

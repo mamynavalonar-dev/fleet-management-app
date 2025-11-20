@@ -8,14 +8,17 @@ import { TrendingUp, DollarSign, Activity, Droplet, Truck } from 'lucide-react';
 const Dashboard = () => {
   const [stats, setStats] = useState({ charts: [], kpis: {} });
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     const fetchStats = async () => {
       try {
+        // Appel à l'API Analytics créée dans fuel.js
         const res = await client.get('/fuel/analytics/dashboard');
         setStats(res.data);
       } catch (error) {
         console.error("Erreur dashboard:", error);
+        setError("Impossible de charger les données.");
       } finally {
         setLoading(false);
       }
@@ -25,7 +28,7 @@ const Dashboard = () => {
 
   const { kpis, charts } = stats;
 
-  // Composant Carte KPI
+  // --- Composant Carte KPI ---
   const StatCard = ({ title, value, icon: Icon, color, subtext }) => (
     <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
       <div className="flex justify-between items-start">
@@ -45,6 +48,8 @@ const Dashboard = () => {
     </div>
   );
 
+  if (error) return <div className="p-8 text-red-500 text-center">{error}</div>;
+
   return (
     <div className="p-8 space-y-8">
       {/* Header */}
@@ -57,67 +62,79 @@ const Dashboard = () => {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard 
           title="Dépenses Totales" 
-          value={`${Number(kpis.total_depense || 0).toLocaleString()} Ar`} 
+          value={`${Number(kpis?.total_depense || 0).toLocaleString()} Ar`} 
           icon={DollarSign} 
           color="bg-blue-500"
-          subtext="Depuis le début"
+          subtext="Cumul global"
         />
         <StatCard 
           title="Conso Moyenne" 
-          value={`${Number(kpis.conso_globale || 0).toFixed(1)} L/100`} 
+          value={`${Number(kpis?.conso_globale || 0).toFixed(1)} L/100`} 
           icon={Droplet} 
           color="bg-purple-500"
-          subtext="Moyenne globale flotte"
+          subtext="Moyenne flotte"
         />
         <StatCard 
           title="Distance Totale" 
-          value={`${Number(kpis.km_total || 0).toLocaleString()} km`} 
+          value={`${Number(kpis?.km_total || 0).toLocaleString()} km`} 
           icon={Truck} 
           color="bg-green-500"
-          subtext="Kilomètres parcourus"
+          subtext="Total parcouru"
         />
         <StatCard 
-          title="Alertes Conso" 
-          value="0" 
+          title="Suivi Actif" 
+          value="Temps Réel" 
           icon={Activity} 
           color="bg-orange-500"
-          subtext="Tout est normal"
+          subtext="Mise à jour auto"
         />
       </div>
 
       {/* Graphiques Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-96">
-        {/* Chart 1: Coûts */}
-        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        {/* Chart 1: Coûts (Correction hauteur appliquée) */}
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col h-96">
           <h3 className="text-lg font-bold text-gray-700 mb-6">Évolution des Coûts (6 derniers mois)</h3>
-          <ResponsiveContainer width="100%" height="85%">
-            <AreaChart data={charts}>
-              <defs>
-                <linearGradient id="colorCout" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
-                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-              <XAxis dataKey="mois" axisLine={false} tickLine={false} />
-              <YAxis axisLine={false} tickLine={false} />
-              <Tooltip formatter={(value) => `${Number(value).toLocaleString()} Ar`} />
-              <Area type="monotone" dataKey="total_cout" stroke="#3b82f6" fillOpacity={1} fill="url(#colorCout)" />
-            </AreaChart>
-          </ResponsiveContainer>
+          <div className="flex-1 w-full min-h-0">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={charts}>
+                <defs>
+                  <linearGradient id="colorCout" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                <XAxis dataKey="mois" axisLine={false} tickLine={false} />
+                <YAxis axisLine={false} tickLine={false} width={80} />
+                <Tooltip 
+                  formatter={(value) => [`${Number(value).toLocaleString()} Ar`, "Coût"]}
+                  contentStyle={{ borderRadius: '10px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
+                />
+                <Area type="monotone" dataKey="total_cout" stroke="#3b82f6" strokeWidth={2} fillOpacity={1} fill="url(#colorCout)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
         </div>
 
-        {/* Chart 2: Consommation */}
-        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+        {/* Chart 2: Consommation (Correction hauteur appliquée) */}
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col h-96">
           <h3 className="text-lg font-bold text-gray-700 mb-6">Moyenne Consommation (L/100km)</h3>
-          <ResponsiveContainer width="100%" height="85%">
-            <BarChart data={charts}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-              <XAxis dataKey="mois" axisLine={false} tickLine={false} />
-              <Tooltip cursor={{fill: '#f3f4f6'}} />
-              <Bar dataKey="avg_conso" fill="#10b981" radius={[6, 6, 0, 0]} barSize={40} />
-            </BarChart>
-          </ResponsiveContainer>
+          <div className="flex-1 w-full min-h-0">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={charts}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                <XAxis dataKey="mois" axisLine={false} tickLine={false} />
+                <YAxis axisLine={false} tickLine={false} />
+                <Tooltip 
+                  cursor={{fill: '#f3f4f6'}} 
+                  formatter={(value) => [`${Number(value).toFixed(1)} L/100`, "Moyenne"]}
+                />
+                <Bar dataKey="avg_conso" fill="#10b981" radius={[6, 6, 0, 0]} barSize={40} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         </div>
       </div>
     </div>

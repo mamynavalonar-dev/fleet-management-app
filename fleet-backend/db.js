@@ -9,4 +9,12 @@ const pool = new Pool({
   database: process.env.DB_NAME
 });
 
+pool.connect((err, client, release) => {
+  if (err) {
+    return console.error('ERREUR CRITIQUE: Impossible de se connecter à la base de données', err.stack);
+  }
+  console.log('✅ Connecté à la base de données PostgreSQL');
+  release();
+});
+
 module.exports = pool;

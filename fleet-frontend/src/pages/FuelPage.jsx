@@ -1,4 +1,3 @@
-// CORRECTION ICI : Ajout de 'useRef' et 'useEffect' dans les imports
 import React, { useState, useRef, useEffect } from 'react';
 import client from '../api/client';
 import FuelTable from '../components/FuelTable';
@@ -9,14 +8,11 @@ const FuelPage = () => {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [importing, setImporting] = useState(false);
   
-  // États pour les dropdowns du formulaire
   const [vehicles, setVehicles] = useState([]);
   const [drivers, setDrivers] = useState([]);
 
-  // Référence pour l'input fichier invisible
   const fileInputRef = useRef(null);
 
-  // Charger les listes au démarrage
   useEffect(() => {
     const loadOptions = async () => {
         try {
@@ -29,7 +25,7 @@ const FuelPage = () => {
     loadOptions();
   }, []);
 
-  // --- LOGIQUE EXPORT ---
+  // --- EXPORT ---
   const handleExport = async () => {
     try {
       const response = await client.get('/fuel/data/export', {
@@ -47,7 +43,7 @@ const FuelPage = () => {
     }
   };
 
-  // --- LOGIQUE IMPORT ---
+  // --- IMPORT ---
   const handleImportClick = () => {
     if(fileInputRef.current) fileInputRef.current.click();
   };
@@ -75,7 +71,7 @@ const FuelPage = () => {
     }
   };
 
-  // --- LOGIQUE FORMULAIRE ---
+  // --- FORMULAIRE ---
   const [formData, setFormData] = useState({
     vehicle_id: '', driver_id: '', date: '', km_depart: '', km_arrivee: '', litres: '', montant: ''
   });
@@ -113,17 +109,28 @@ const FuelPage = () => {
           <p className="text-gray-500 mt-1">Gestion des données et historique.</p>
         </div>
 
+        {/* 🔥 CORRECTION : UN SEUL GROUPE DE BOUTONS */}
         <div className="flex gap-3">
-          <button onClick={handleExport} className="bg-white border border-gray-200 text-gray-700 px-4 py-2 rounded-xl shadow-sm hover:bg-gray-50 flex items-center gap-2 transition-all">
+          <button 
+            onClick={handleExport} 
+            className="bg-white border border-gray-200 text-gray-700 px-4 py-2 rounded-xl shadow-sm hover:bg-gray-50 flex items-center gap-2 transition-all"
+          >
             <Download size={18} /> Exporter
           </button>
           
-          <button onClick={handleImportClick} disabled={importing} className="bg-white border border-gray-200 text-gray-700 px-4 py-2 rounded-xl shadow-sm hover:bg-gray-50 flex items-center gap-2 transition-all disabled:opacity-50">
+          <button 
+            onClick={handleImportClick} 
+            disabled={importing} 
+            className="bg-white border border-gray-200 text-gray-700 px-4 py-2 rounded-xl shadow-sm hover:bg-gray-50 flex items-center gap-2 transition-all disabled:opacity-50"
+          >
             {importing ? <Loader2 className="animate-spin" size={18}/> : <Upload size={18} />}
             {importing ? 'Envoi...' : 'Importer'}
           </button>
 
-          <button onClick={() => setIsModalOpen(true)} className="bg-primary hover:bg-blue-700 text-white px-5 py-2 rounded-xl shadow-lg flex items-center gap-2 transition-all">
+          <button 
+            onClick={() => setIsModalOpen(true)} 
+            className="bg-primary hover:bg-blue-700 text-white px-5 py-2 rounded-xl shadow-lg flex items-center gap-2 transition-all"
+          >
             <Plus size={20} /> Nouveau
           </button>
         </div>

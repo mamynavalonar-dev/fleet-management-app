@@ -101,13 +101,18 @@ router.get('/', async (req, res) => {
     const offset = (page - 1) * limit;
 
     // --- Récupération des filtres spécifiques ---
-    // Le frontend peut envoyer ?search=... (global) OU des champs précis
     const searchGlobal = req.query.search || '';
     
     // On prépare les conditions SQL dynamiques
-    let whereClauses = ["1=1"]; // Toujours vrai par défaut
+    let whereClauses = ["1=1"]; 
     let values = [];
     let paramCounter = 1;
+
+    // 🔴 NOUVEAU : FILTRE DE CORBEILLE
+    const isDeleted = req.query.deleted === 'true'; 
+    whereClauses.push(`f.is_deleted = $${paramCounter}`);
+    values.push(isDeleted);
+    paramCounter++;
 
     // Fonction utilitaire pour ajouter un filtre
     const addFilter = (field, value, operator = 'ILIKE') => {
@@ -119,31 +124,23 @@ router.get('/', async (req, res) => {
     };
 
     // 1. Recherche Globale (Barre du haut)
-    // Si on a une recherche globale, elle cherche partout (OR)
     if (searchGlobal) {
       whereClauses.push(`(v.immatriculation ILIKE $${paramCounter} OR d.nom ILIKE $${paramCounter})`);
       values.push(`%${searchGlobal}%`);
       paramCounter++;
     }
 
-    // 2. Filtres par Colonne (Menus déroulants)
-    // Note: Le frontend envoie parfois tout dans 'search', 
-    // mais pour être précis, il faudrait modifier le frontend pour envoyer ?immatriculation=...
-    // Ici, on supporte les deux approches si vous évoluez le frontend.
-    
+    // 2. Filtres par Colonne
     addFilter('v.immatriculation', req.query.immatriculation);
     addFilter('d.nom', req.query.chauffeur_nom);
     
-    // Pour les chiffres/dates, on peut faire des égalités strictes ou range
     if (req.query.date) {
-      // Recherche par date exacte (ou partiel sur le string converti)
       whereClauses.push(`TO_CHAR(f.date, 'YYYY-MM-DD') ILIKE $${paramCounter}`);
       values.push(`%${req.query.date}%`);
       paramCounter++;
     }
     
     if (req.query.litres) {
-      // Recherche exacte pour les chiffres (ou ajuster selon besoin > <)
       whereClauses.push(`CAST(f.litres AS TEXT) ILIKE $${paramCounter}`);
       values.push(`%${req.query.litres}%`);
       paramCounter++;
@@ -159,11 +156,10 @@ router.get('/', async (req, res) => {
 
     // Sécurisation du tri
     const allowedSorts = ['date', 'litres', 'montant', 'consumption_rate', 'immatriculation', 'chauffeur_nom'];
-    // Mapping pour les champs qui sont dans des tables jointes
     let safeSortBy = allowedSorts.includes(sortBy) ? sortBy : 'date';
     if (safeSortBy === 'immatriculation') safeSortBy = 'v.immatriculation';
     if (safeSortBy === 'chauffeur_nom') safeSortBy = 'd.nom';
-    if (!safeSortBy.includes('.')) safeSortBy = `f.${safeSortBy}`; // Par défaut table fuel_logs (f)
+    if (!safeSortBy.includes('.')) safeSortBy = `f.${safeSortBy}`; 
 
     // --- Requête Principale ---
     const dataQuery = `
@@ -186,8 +182,8 @@ router.get('/', async (req, res) => {
     `;
 
     // Exécution
-    const finalParams = [...values, limit, offset]; // Paramètres pour data
-    const countParams = [...values]; // Paramètres pour count
+    const finalParams = [...values, limit, offset]; 
+    const countParams = [...values]; 
 
     const [logs, countResult] = await Promise.all([
       pool.query(dataQuery, finalParams), 
@@ -433,8 +429,14 @@ router.post('/data/import', upload.single('file'), async (req, res) => {
 // ==================================================================
 router.post('/', async (req, res) => {
   try {
-    const { vehicle_id, driver_id, date, km_depart, km_arrivee, litres, montant } = req.body;
+    // On récupère les valeurs
+    let { vehicle_id, driver_id, date, km_depart, km_arrivee, litres, montant } = req.body;
     
+    // Si driver_id est une chaîne vide "" (cas "Sélectionner..."), on le force à NULL
+    const safeDriverId = (driver_id === '' || driver_id === undefined || driver_id === 'undefined') 
+      ? null 
+      : parseInt(driver_id);
+
     // --- APPLICATION LOGIQUE MÉTIER ---
     const smartData = optimizeFuelData(
       parseFloat(litres), 
@@ -447,20 +449,20 @@ router.post('/', async (req, res) => {
       `INSERT INTO fuel_logs (vehicle_id, driver_id, date, km_depart, km_arrivee, litres, montant, consumption_rate) 
        VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
       [
-        vehicle_id, 
-        driver_id, 
+        parseInt(vehicle_id), 
+        safeDriverId,         
         date, 
-        km_depart, 
-        smartData.km_arrivee, // Valeur corrigée
-        litres, 
-        montant, 
+        parseFloat(km_depart), 
+        smartData.km_arrivee, 
+        parseFloat(litres), 
+        parseFloat(montant), 
         smartData.consumption
       ]
     );
     res.json(newLog.rows[0]);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Erreur Serveur" });
+    console.error("Erreur création plein:", err);
+    res.status(500).json({ error: "Erreur Serveur: " + err.message });
   }
 });
 
@@ -491,7 +493,7 @@ router.put('/:id', async (req, res) => {
         driver_id, 
         date, 
         km_depart, 
-        smartData.km_arrivee, // Valeur corrigée
+        smartData.km_arrivee, 
         litres, 
         montant, 
         smartData.consumption, 
@@ -506,17 +508,46 @@ router.put('/:id', async (req, res) => {
   }
 });
 
+
 // ==================================================================
-// 8. DELETE
+// 8. CORBEILLE (SOFT DELETE / RESTORE / HARD DELETE)
 // ==================================================================
+
+// SOFT DELETE (Mettre à la corbeille)
+router.put('/trash/:id', async (req, res) => {
+    try {
+        await pool.query('UPDATE fuel_logs SET is_deleted = true WHERE id = $1', [req.params.id]);
+        res.json({ message: "Plein mis à la corbeille" });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send("Erreur Serveur lors de la mise en corbeille.");
+    }
+});
+
+// RESTORE (Restaurer depuis la corbeille)
+router.put('/restore/:id', async (req, res) => {
+    try {
+        await pool.query('UPDATE fuel_logs SET is_deleted = false WHERE id = $1', [req.params.id]);
+        res.json({ message: "Plein restauré" });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send("Erreur Serveur lors de la restauration.");
+    }
+});
+
+// HARD DELETE (Suppression définitive)
+// NOTE : Il y a un conflit de route ici avec DELETE /:id si la route DELETE /:id standard existe AVANT.
+// Je garde les deux implémentations pour la suppression définitive par souci de complétude.
+// La route DELETE /:id standard est conservée en 8.
 router.delete('/:id', async (req, res) => {
   try {
     await pool.query('DELETE FROM fuel_logs WHERE id = $1', [req.params.id]);
-    res.json({ message: "Supprimé" });
+    res.json({ message: "Supprimé définitivement" });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Erreur Serveur" });
   }
 });
+
 
 module.exports = router;

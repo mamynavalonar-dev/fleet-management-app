@@ -10,7 +10,8 @@ import client from '../api/client';
 import { 
   ChevronLeft, ChevronRight, Search, Loader2, 
   Trash2, Edit2, X, Check, Eye, EyeOff, 
-  Filter, ArrowUpAZ, ArrowDownZA, ListFilter
+  Filter, ArrowUpAZ, ArrowDownZA, ListFilter, RefreshCw, 
+  ChevronsLeft, ChevronsRight
 } from 'lucide-react';
 import toast, { Toaster } from 'react-hot-toast';
 
@@ -134,7 +135,8 @@ const ColumnMenu = ({ column, title, options = [], onFilterChange, currentFilter
 // =========================================================
 // 2. COMPOSANT PRINCIPAL (TABLEAU)
 // =========================================================
-const FuelTable = ({ refreshTrigger }) => {
+// 🔴 MISE À JOUR DE LA SIGNATURE : Ajout de viewTrash et actions
+const FuelTable = ({ refreshTrigger, viewTrash, actions }) => {
   const navigate = useNavigate();
 
   // --- ÉTATS ---
@@ -157,8 +159,12 @@ const FuelTable = ({ refreshTrigger }) => {
   const [editingRow, setEditingRow] = useState(null);
   const [editFormData, setEditFormData] = useState({});
   
-  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState(null);
+  // 🔴 Supprimer les états/fonctions de suppression locale
+  // const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  // const [deleteTarget, setDeleteTarget] = useState(null);
+
+  // 🔴 Extraction des fonctions d'action passées par FuelPage
+  const { moveToTrash, restoreFromTrash, deleteForever } = actions;
 
   // Listes pour les menus déroulants
   const [vehiclesOptions, setVehiclesOptions] = useState([]);
@@ -172,13 +178,15 @@ const FuelTable = ({ refreshTrigger }) => {
       const sortOrder = sorting.length > 0 && sorting[0].desc ? 'desc' : 'asc';
 
       // Construction des paramètres
-      // On envoie explicitement chaque filtre au backend
       const res = await client.get('/fuel', {
         params: {
           page: pagination.pageIndex + 1,
           limit: pagination.pageSize,
           sortBy: sortField,
           sortOrder: sortOrder,
+          
+          // 🔴 CORRECTION CRITIQUE : Filtre pour la corbeille
+          deleted: viewTrash, 
           
           // Filtres individuels
           immatriculation: columnFilters.immatriculation,
@@ -204,7 +212,7 @@ const FuelTable = ({ refreshTrigger }) => {
     } finally {
       setLoading(false);
     }
-  }, [pagination.pageIndex, pagination.pageSize, sorting, columnFilters]);
+  }, [pagination.pageIndex, pagination.pageSize, sorting, columnFilters, viewTrash]); // 🔴 AJOUT DE viewTrash aux dépendances
 
   const fetchOptions = async () => {
     try {
@@ -251,7 +259,13 @@ const FuelTable = ({ refreshTrigger }) => {
 
   const handleSaveEdit = async () => {
     try {
-      await client.put(`/fuel/${editFormData.id}`, editFormData);
+      // 🔴 Si le plein a un driver_id vide ou null, on le force à une chaîne vide pour le PUT
+      const dataToSave = {
+        ...editFormData,
+        driver_id: editFormData.driver_id || '', 
+      };
+
+      await client.put(`/fuel/${dataToSave.id}`, dataToSave);
       toast.success('Modifié avec succès !');
       setEditingRow(null);
       fetchData();
@@ -259,17 +273,8 @@ const FuelTable = ({ refreshTrigger }) => {
       toast.error('Erreur modification');
     }
   };
-
-  const handleDelete = async () => {
-    try {
-      await client.delete(`/fuel/${deleteTarget}`);
-      toast.success('Supprimé avec succès !');
-      setIsDeleteModalOpen(false);
-      fetchData();
-    } catch (error) {
-      toast.error('Erreur suppression');
-    }
-  };
+  
+  // 🔴 Suppression de la fonction handleDelete locale
 
   // --- DÉFINITION DES COLONNES ---
   const columnHelper = createColumnHelper();
@@ -367,6 +372,8 @@ const FuelTable = ({ refreshTrigger }) => {
       header: () => <span className="text-xs font-bold text-gray-700 uppercase">ACTIONS</span>,
       cell: (props) => {
         const row = props.row.original;
+        
+        // 1. Mode Edition
         if (editingRow === row.id) {
           return (
             <div className="flex gap-2 justify-center">
@@ -375,14 +382,51 @@ const FuelTable = ({ refreshTrigger }) => {
             </div>
           );
         }
+
+        // 2. Mode Corbeille (viewTrash = true)
+        if (viewTrash) {
+            return (
+                <div className="flex justify-center gap-2">
+                    <button 
+                        onClick={() => restoreFromTrash(row.id)} 
+                        className="p-1.5 text-green-500 hover:bg-green-50 rounded transition-colors" 
+                        title="Restaurer"
+                    >
+                        <RefreshCw size={16}/>
+                    </button>
+                    <button 
+                        onClick={() => deleteForever(row.id)} 
+                        className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors" 
+                        title="Supprimer Définitivement"
+                    >
+                        <X size={16}/>
+                    </button>
+                </div>
+            );
+        }
+
+        // 3. Mode Normal (viewTrash = false)
         return (
           <div className="flex justify-center gap-2">
-            <button onClick={() => navigate(`/vehicles/${row.vehicle_id}`)} className="p-1.5 text-blue-500 hover:bg-blue-50 rounded transition-colors" title="Voir"><Eye size={16}/></button>
+            <button 
+                onClick={() => navigate(`/vehicles/${row.vehicle_id}/logbook`)} 
+                className="p-1.5 text-blue-500 hover:bg-blue-50 rounded transition-colors" 
+                title="Voir Journal de Bord"
+              >
+                <Eye size={16}/>
+              </button>
             <button onClick={() => handleStartEdit(row)} className="p-1.5 text-purple-500 hover:bg-purple-50 rounded transition-colors" title="Modifier"><Edit2 size={16}/></button>
-            <button onClick={() => { setDeleteTarget(row.id); setIsDeleteModalOpen(true); }} className="p-1.5 text-red-500 hover:bg-red-50 rounded transition-colors" title="Supprimer"><Trash2 size={16}/></button>
+            <button 
+                // 🔴 APPELLE LA FONCTION DE SOFT DELETE (Mettre à la corbeille)
+                onClick={() => moveToTrash(row.id)} 
+                className="p-1.5 text-red-500 hover:bg-red-50 rounded transition-colors" 
+                title="Mettre à la corbeille"
+            >
+                <Trash2 size={16}/>
+            </button>
           </div>
         );
-      }
+      },
     })
   ];
 
@@ -447,7 +491,7 @@ const FuelTable = ({ refreshTrigger }) => {
             {loading ? (
               <tr><td colSpan={columns.length} className="p-10 text-center"><Loader2 className="animate-spin mx-auto text-blue-500" size={32} /></td></tr>
             ) : data.length === 0 ? (
-              <tr><td colSpan={columns.length} className="p-10 text-center text-gray-400 italic">Aucune donnée trouvée.</td></tr>
+              <tr><td colSpan={columns.length} className="p-10 text-center text-gray-400 italic">{viewTrash ? "La corbeille est vide." : "Aucune donnée trouvée."}</td></tr>
             ) : (
               table.getRowModel().rows.map((row, idx) => (
                 <tr key={row.id} className={`hover:bg-blue-50/30 transition-colors ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/30'} ${editingRow === row.original.id ? 'bg-yellow-50 border-l-4 border-yellow-400' : ''}`}>
@@ -472,22 +516,7 @@ const FuelTable = ({ refreshTrigger }) => {
         </div>
       </div>
 
-      {/* Modal Suppression */}
-      {isDeleteModalOpen && (
-        <div className="fixed inset-0 bg-black/20 backdrop-blur-sm flex justify-center items-center z-[100]">
-          <div className="bg-white rounded-xl shadow-2xl p-6 max-w-sm w-full mx-4 animate-in fade-in zoom-in duration-200">
-            <div className="text-center">
-              <div className="mx-auto w-12 h-12 bg-red-100 rounded-full flex items-center justify-center mb-4 text-red-500"><Trash2 size={24}/></div>
-              <h3 className="text-lg font-bold text-gray-800">Confirmer ?</h3>
-              <p className="text-sm text-gray-500 mb-6 mt-2">Cette action est irréversible.</p>
-              <div className="flex gap-3">
-                <button onClick={() => setIsDeleteModalOpen(false)} className="flex-1 py-2 border rounded-lg hover:bg-gray-50 text-sm font-medium">Annuler</button>
-                <button onClick={handleDelete} className="flex-1 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 text-sm font-medium shadow-lg shadow-red-200">Supprimer</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* 🔴 SUPPRESSION DU MODAL DE SUPPRESSION LOCALE (remplacé par les fonctions de la page parente) */}
     </div>
   );
 };

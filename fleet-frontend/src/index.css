@@ -74,3 +74,38 @@ button:focus-visible {
     background-color: #f9f9f9;
   }
 }
+/* --- GESTION DE L'IMPRESSION --- */
+@media print {
+  /* Cacher tout le corps de la page par défaut */
+  body * {
+    visibility: hidden;
+  }
+
+  /* Cacher spécifiquement la sidebar et les boutons d'action */
+  nav, aside, .sidebar, .no-print {
+    display: none !important;
+  }
+
+  /* Afficher uniquement la zone imprimable */
+  .printable-area, .printable-area * {
+    visibility: visible;
+  }
+
+  /* Repositionner la zone imprimable en haut à gauche */
+  .printable-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    background: white;
+    border: none;
+    box-shadow: none;
+  }
+  
+  /* Ajustement des couleurs pour l'impression */
+  .bg-gray-50 {
+    background-color: white !important;
+  }
+}

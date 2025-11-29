@@ -1,7 +1,8 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect , useMemo} from 'react';
 import client from '../api/client';
-import FuelTable from '../components/FuelTable';
-import { Fuel, Plus, Download, Upload, Loader2, X } from 'lucide-react';
+import FuelTable from '../components/FuelTable'; // Assurez-vous que FuelTable.jsx utilise viewTrash
+import { Fuel, Plus, Download, Upload, Loader2, X, Trash2, RefreshCw } from 'lucide-react';
+import toast from 'react-hot-toast'; // Ajoutez toast si ce n'est pas déjà fait
 
 const FuelPage = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -12,6 +13,9 @@ const FuelPage = () => {
   const [drivers, setDrivers] = useState([]);
 
   const fileInputRef = useRef(null);
+
+  // 🔴 NOUVEL ÉTAT POUR LA CORBEILLE
+  const [viewTrash, setViewTrash] = useState(false);
 
   useEffect(() => {
     const loadOptions = async () => {
@@ -24,6 +28,34 @@ const FuelPage = () => {
     };
     loadOptions();
   }, []);
+
+  // 🔴 NOUVELLE FONCTIONS DE GESTION DE LA CORBEILLE
+  const moveToTrash = async (fuelId) => {
+    if(!window.confirm("Déplacer vers la corbeille ?")) return;
+    try {
+        await client.put(`/fuel/trash/${fuelId}`);
+        toast.success("Mis à la corbeille");
+        setRefreshTrigger(prev => prev + 1); // Déclenche le rechargement du tableau
+    } catch (e) { toast.error("Erreur mise en corbeille"); }
+  };
+
+  const restoreFromTrash = async (fuelId) => {
+    try {
+        await client.put(`/fuel/restore/${fuelId}`);
+        toast.success("Restauré !");
+        setRefreshTrigger(prev => prev + 1);
+    } catch (e) { toast.error("Erreur restauration"); }
+  };
+
+  const deleteForever = async (fuelId) => {
+    if(!window.confirm("ATTENTION : Suppression définitive ! Continuer ?")) return;
+    try {
+        await client.delete(`/fuel/${fuelId}`);
+        toast.success("Supprimé définitivement");
+        setRefreshTrigger(prev => prev + 1);
+    } catch (e) { toast.error("Erreur suppression définitive"); }
+  };
+  // FIN DES NOUVELLES FONCTIONS DE GESTION DE LA CORBEILLE
 
   // --- EXPORT ---
   const handleExport = async () => {
@@ -60,11 +92,11 @@ const FuelPage = () => {
       const res = await client.post('/fuel/data/import', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
-      alert(res.data.message);
+      toast.success(res.data.message); // Utilisation de toast
       setRefreshTrigger(prev => prev + 1);
     } catch (error) {
       console.error(error);
-      alert("Erreur lors de l'importation.");
+      toast.error("Erreur lors de l'importation."); // Utilisation de toast
     } finally {
       setImporting(false);
       e.target.value = null;
@@ -85,8 +117,8 @@ const FuelPage = () => {
         setRefreshTrigger(prev => prev + 1);
         setIsModalOpen(false);
         setFormData({ vehicle_id: '', driver_id: '', date: '', km_depart: '', km_arrivee: '', litres: '', montant: '' });
-        alert("Enregistré !");
-    } catch (e) { alert("Erreur enregistrement"); }
+        toast.success("Enregistré !"); // Utilisation de toast
+    } catch (e) { toast.error("Erreur enregistrement"); } // Utilisation de toast
   };
 
   return (
@@ -106,11 +138,19 @@ const FuelPage = () => {
             <Fuel className="text-primary" size={32} />
             Suivi Carburant
           </h1>
-          <p className="text-gray-500 mt-1">Gestion des données et historique.</p>
+          <p className="text-gray-500 mt-1">{viewTrash ? "Éléments supprimés (Corbeille)" : "Gestion des données et historique."}</p>
         </div>
 
-        {/* 🔥 CORRECTION : UN SEUL GROUPE DE BOUTONS */}
         <div className="flex gap-3">
+            {/* 🔴 NOUVEAU BOUTON CORBEILLE */}
+            <button 
+                onClick={() => setViewTrash(!viewTrash)}
+                className={`flex items-center gap-2 px-3 py-1 rounded-xl text-sm font-bold transition-colors ${viewTrash ? 'bg-red-100 text-red-600 border border-red-200' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
+                title={viewTrash ? "Voir les éléments actifs" : "Voir la Corbeille"}
+            >
+                <Trash2 size={18}/> {viewTrash ? "Quitter la Corbeille" : "Corbeille"}
+            </button>
+          
           <button 
             onClick={handleExport} 
             className="bg-white border border-gray-200 text-gray-700 px-4 py-2 rounded-xl shadow-sm hover:bg-gray-50 flex items-center gap-2 transition-all"
@@ -127,16 +167,23 @@ const FuelPage = () => {
             {importing ? 'Envoi...' : 'Importer'}
           </button>
 
-          <button 
-            onClick={() => setIsModalOpen(true)} 
-            className="bg-primary hover:bg-blue-700 text-white px-5 py-2 rounded-xl shadow-lg flex items-center gap-2 transition-all"
-          >
-            <Plus size={20} /> Nouveau
-          </button>
+          {!viewTrash && ( // Cacher le bouton Nouveau en mode Corbeille
+              <button 
+                onClick={() => setIsModalOpen(true)} 
+                className="bg-primary hover:bg-blue-700 text-white px-5 py-2 rounded-xl shadow-lg flex items-center gap-2 transition-all"
+              >
+                <Plus size={20} /> Nouveau
+              </button>
+          )}
         </div>
       </div>
 
-      <FuelTable refreshTrigger={refreshTrigger} />
+      {/* 🔴 MISE À JOUR : Passage de l'état Corbeille et des fonctions au FuelTable */}
+      <FuelTable 
+        refreshTrigger={refreshTrigger} 
+        viewTrash={viewTrash} 
+        actions={{ moveToTrash, restoreFromTrash, deleteForever }}
+      />
 
       {/* MODAL AJOUT */}
       {isModalOpen && (

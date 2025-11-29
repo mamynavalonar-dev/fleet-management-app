@@ -1,0 +1,63 @@
+Idées d'Amélioration & Suggestions
+Voici des propositions classées par catégorie, allant de la dette technique aux fonctionnalités innovantes.
+
+A. Améliorations Techniques (Code & Robustesse)
+Sécurité & Validation (Backend) :
+
+Problème : Il n'y a pas de validation stricte des données entrantes (ex: req.body) autre que le frontend.
+
+Solution : Intégrer Zod ou Joi dans le backend pour valider les données avant l'insertion SQL.
+
+SQL Injection : Bien que vous utilisiez des requêtes paramétrées ($1), la construction dynamique des clauses WHERE dans fuel.js (filtres) est sensible. Il faudrait utiliser une librairie de construction de requêtes (comme Knex.js) ou renforcer la sanitisation.
+
+Configuration Dynamique (La règle des 14.5L) :
+
+Problème : La logique de lissage (targetConso = 14.5) et la limite (120km) sont codées en dur ("Hardcoded") dans routes/fuel.js.
+
+Solution : Créer une table settings en base de données. L'admin pourrait définir ces seuils via la page SettingsPage (ex: un camion consomme 30L, une citadine 6L). Actuellement, votre logique faussera les données d'un camion.
+
+Typage (TypeScript) :
+
+Le projet est en JS. Passer à TypeScript (surtout pour la logique complexe d'import Excel et les props React) réduirait considérablement les bugs de type "Cannot read property of undefined".
+
+B. Nouvelles Fonctionnalités Fonctionnelles
+Module de Maintenance & Alertes :
+
+Idée : Ajouter une table maintenances.
+
+Fonction : Définir des alertes basées sur le kilométrage (ex: "Vidange tous les 10 000 km"). Le système compare le dernier relevé kilométrique (table fuel_logs) et envoie une alerte dans le Dashboard si la maintenance est due.
+
+Gestion Électronique des Documents (GED) :
+
+Idée : Permettre l'upload de photos ou scan dans VehiclesPage et DriversPage.
+
+Usage : Stocker la carte grise, l'assurance, le permis du chauffeur.
+
+Alerte : Notification avant l'expiration de l'assurance ou de la visite technique.
+
+Authentification & Rôles :
+
+Actuellement, tout est ouvert.
+
+Ajouter un login (JWT) et des rôles : Admin (peut tout faire), Gestionnaire (peut voir/éditer mais pas supprimer définitivement), Consultant (lecture seule).
+
+Amélioration du "Logique Métier" (Détection de Fraude) :
+
+Actuellement, vous "lissez" la consommation. C'est dangereux car cela masque les vols de carburant.
+
+Proposition : Au lieu de corriger automatiquement le KM, marquez la ligne avec un "Flag" (Drapeau Rouge) : "Suspicion de vol" ou "Anomalie". Laissez le gestionnaire décider s'il faut corriger ou enquêter.
+
+C. Améliorations UX/UI (Frontend)
+Dashboard Interactif (Date Range Picker) :
+
+Actuellement, le dashboard montre "les 6 derniers mois".
+
+Ajouter un sélecteur de date (ex: "Mois en cours", "Année 2024", "Personnalisé") pour filtrer les graphiques.
+
+Comparateur de Véhicules :
+
+Une page pour sélectionner 2 véhicules et comparer leurs courbes de consommation et de coût sur un même graphique.
+
+Vue "Calendrier" pour les Missions :
+
+Remplacer ou compléter la liste des missions par un composant FullCalendar. Cela permettrait de voir visuellement les disponibilités des véhicules et chauffeurs pour éviter les conflits de planning.

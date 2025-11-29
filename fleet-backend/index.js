@@ -13,6 +13,8 @@ app.use('/api/fuel', require('./routes/fuel'));
 app.use('/api/drivers', require('./routes/drivers')); 
 app.use('/api/missions', require('./routes/missions'));
 
+app.use('/api/trips', require('./routes/trips'));
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);

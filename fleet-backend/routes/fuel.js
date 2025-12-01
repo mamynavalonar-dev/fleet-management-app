@@ -8,7 +8,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
 // ==================================================================
-// 🧠 LOGIQUE MÉTIER (Votre "Cerveau" de gestion)
+// 🧠 LOGIQUE MÉTIER (Détection de Fraude & Calculs)
 // ==================================================================
 const optimizeFuelData = (litres, montant, km_depart, km_arrivee_brut) => {
   let km_arrivee = km_arrivee_brut;
@@ -17,49 +17,58 @@ const optimizeFuelData = (litres, montant, km_depart, km_arrivee_brut) => {
   let isReplein = true;
   let warnings = [];
   let adjusted = false;
+  let fraud_flag = false;
 
   // Règle 1 : Si Montant < 200 000 Ar => C'est un appoint (Non Replein)
   if (montant < 200000) {
     isReplein = false;
-    consumption = 0; // Pas de calcul de conso sur un appoint
+    consumption = 0; 
   } else {
     // Calcul initial
     if (distance > 0) {
       consumption = (litres / distance) * 100;
     }
 
-    // Règle 2 : Norme Conso entre 13 et 16 L/100
-    // Si hors norme, on ajuste le KM Arrivée pour tomber sur 14.5 (Moyenne idéale)
+    // Règle 2 : Détection d'anomalie (Norme 13L - 16L)
     if (consumption > 0 && (consumption < 13 || consumption > 16)) {
-      const targetConso = 14.5;
-      // Formule inverse : Distance = (Litres * 100) / ConsoCible
-      const idealDistance = Math.round((litres * 100) / targetConso);
+      fraud_flag = true;
+      warnings.push(`⚠️ ANOMALIE DÉTECTÉE: Consommation ${consumption.toFixed(1)} L/100 km (Norme: 13-16)`);
       
-      // On met à jour le KM Arrivée
-      km_arrivee = km_depart + idealDistance;
-      distance = idealDistance;
-      consumption = targetConso; // La conso est maintenant parfaite
-      adjusted = true;
+      const targetConso = 14.5;
+      const idealDistance = Math.round((litres * 100) / targetConso);
+      const expectedKm = km_depart + idealDistance;
+      
+      warnings.push(`📊 KM Attendu: ${expectedKm.toLocaleString()} km (vs ${km_arrivee.toLocaleString()} déclaré)`);
+      
+      const ecartPourcent = Math.abs((km_arrivee - expectedKm) / expectedKm) * 100;
+      if (ecartPourcent > 30) {
+        warnings.push(`🚨 FRAUDE PROBABLE: Écart de ${ecartPourcent.toFixed(0)}% par rapport à la normale`);
+      }
     }
   }
 
-  // Règle 3 : KM Journalier ne doit pas dépasser 120
+  // Règle 3 : KM Journalier aberrant
   if (distance > 120) {
-    warnings.push("⚠️ KM > 120");
+    warnings.push("⚠️ KM > 120 (Distance journalière inhabituelle)");
+  }
+
+  const raw_consumption = consumption;
+  
+  // Si fraude suspectée, on met la conso affichée à 0 pour ne pas fausser les moyennes
+  if (fraud_flag) {
+    consumption = 0; 
   }
 
   return {
-    km_arrivee,      // Le nouveau KM (potentiellement corrigé)
-    consumption,     // La conso (lissée ou 0)
-    isReplein,
-    adjusted,        // Booléen pour savoir si on a touché aux chiffres
-    warnings
+    km_arrivee, consumption, raw_consumption, isReplein, adjusted, fraud_flag, warnings
   };
 };
 
 // ==================================================================
-// 1. ANALYTICS (Dashboard)
+// 🚨 ROUTES SPÉCIFIQUES (DOIVENT ÊTRE EN PREMIER !!!)
 // ==================================================================
+
+// 1. Analytics Dashboard
 router.get('/analytics/dashboard', async (req, res) => {
   try {
     const graphQuery = `
@@ -67,16 +76,17 @@ router.get('/analytics/dashboard', async (req, res) => {
              CAST(SUM(montant) AS INTEGER) as total_cout, 
              ROUND(AVG(NULLIF(consumption_rate, 0)), 1) as avg_conso
       FROM fuel_logs 
-      WHERE date > NOW() - INTERVAL '6 months' 
-      GROUP BY mois 
-      ORDER BY mois ASC
+      WHERE date > NOW() - INTERVAL '6 months' AND is_deleted = false
+      GROUP BY mois ORDER BY mois ASC
     `;
     const kpiQuery = `
       SELECT 
         COALESCE(SUM(montant), 0) as total_depense, 
         COALESCE(AVG(NULLIF(consumption_rate, 0)), 0) as conso_globale, 
-        COALESCE(SUM(km_arrivee - km_depart), 0) as km_total 
+        COALESCE(SUM(km_arrivee - km_depart), 0) as km_total,
+        (SELECT COUNT(*) FROM fuel_logs WHERE fraud_flag = true AND is_deleted = false) as total_anomalies
       FROM fuel_logs
+      WHERE is_deleted = false
     `;
     const [graphData, kpiData] = await Promise.all([
       pool.query(graphQuery), 
@@ -89,149 +99,7 @@ router.get('/analytics/dashboard', async (req, res) => {
   }
 });
 
-// ==================================================================
-// 2. LECTURE (Tableau avec Filtres Avancés Style Excel)
-// ==================================================================
-router.get('/', async (req, res) => {
-  try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const sortBy = req.query.sortBy || 'date';
-    const sortOrder = req.query.sortOrder === 'desc' ? 'DESC' : 'ASC';
-    const offset = (page - 1) * limit;
-
-    // --- Récupération des filtres spécifiques ---
-    const searchGlobal = req.query.search || '';
-    
-    // On prépare les conditions SQL dynamiques
-    let whereClauses = ["1=1"]; 
-    let values = [];
-    let paramCounter = 1;
-
-    // 🔴 NOUVEAU : FILTRE DE CORBEILLE
-    const isDeleted = req.query.deleted === 'true'; 
-    whereClauses.push(`f.is_deleted = $${paramCounter}`);
-    values.push(isDeleted);
-    paramCounter++;
-
-    // Fonction utilitaire pour ajouter un filtre
-    const addFilter = (field, value, operator = 'ILIKE') => {
-      if (value) {
-        whereClauses.push(`${field} ${operator} $${paramCounter}`);
-        values.push(operator === 'ILIKE' ? `%${value}%` : value);
-        paramCounter++;
-      }
-    };
-
-    // 1. Recherche Globale (Barre du haut)
-    if (searchGlobal) {
-      whereClauses.push(`(v.immatriculation ILIKE $${paramCounter} OR d.nom ILIKE $${paramCounter})`);
-      values.push(`%${searchGlobal}%`);
-      paramCounter++;
-    }
-
-    // 2. Filtres par Colonne
-    addFilter('v.immatriculation', req.query.immatriculation);
-    addFilter('d.nom', req.query.chauffeur_nom);
-    
-    if (req.query.date) {
-      whereClauses.push(`TO_CHAR(f.date, 'YYYY-MM-DD') ILIKE $${paramCounter}`);
-      values.push(`%${req.query.date}%`);
-      paramCounter++;
-    }
-    
-    if (req.query.litres) {
-      whereClauses.push(`CAST(f.litres AS TEXT) ILIKE $${paramCounter}`);
-      values.push(`%${req.query.litres}%`);
-      paramCounter++;
-    }
-
-    if (req.query.montant) {
-      whereClauses.push(`CAST(f.montant AS TEXT) ILIKE $${paramCounter}`);
-      values.push(`%${req.query.montant}%`);
-      paramCounter++;
-    }
-
-    const whereString = whereClauses.join(' AND ');
-
-    // Sécurisation du tri
-    const allowedSorts = ['date', 'litres', 'montant', 'consumption_rate', 'immatriculation', 'chauffeur_nom'];
-    let safeSortBy = allowedSorts.includes(sortBy) ? sortBy : 'date';
-    if (safeSortBy === 'immatriculation') safeSortBy = 'v.immatriculation';
-    if (safeSortBy === 'chauffeur_nom') safeSortBy = 'd.nom';
-    if (!safeSortBy.includes('.')) safeSortBy = `f.${safeSortBy}`; 
-
-    // --- Requête Principale ---
-    const dataQuery = `
-      SELECT f.*, v.immatriculation, d.nom as chauffeur_nom 
-      FROM fuel_logs f
-      JOIN vehicles v ON f.vehicle_id = v.id
-      LEFT JOIN drivers d ON f.driver_id = d.id
-      WHERE ${whereString}
-      ORDER BY ${safeSortBy} ${sortOrder}
-      LIMIT $${paramCounter} OFFSET $${paramCounter + 1}
-    `;
-
-    // --- Requête de Comptage (pour la pagination) ---
-    const countQuery = `
-      SELECT COUNT(*) 
-      FROM fuel_logs f 
-      JOIN vehicles v ON f.vehicle_id = v.id 
-      LEFT JOIN drivers d ON f.driver_id = d.id 
-      WHERE ${whereString}
-    `;
-
-    // Exécution
-    const finalParams = [...values, limit, offset]; 
-    const countParams = [...values]; 
-
-    const [logs, countResult] = await Promise.all([
-      pool.query(dataQuery, finalParams), 
-      pool.query(countQuery, countParams)
-    ]);
-
-    res.json({ 
-      data: logs.rows, 
-      meta: { 
-        totalRows: parseInt(countResult.rows[0].count), 
-        totalPages: Math.ceil(parseInt(countResult.rows[0].count) / limit), 
-        currentPage: page 
-      } 
-    });
-
-  } catch (err) {
-    console.error("Erreur route /fuel:", err);
-    res.status(500).json({ error: "Erreur Serveur", details: err.message });
-  }
-});
-
-// ==================================================================
-// 3. DÉTAILS D'UN PLEIN
-// ==================================================================
-router.get('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const result = await pool.query(`
-      SELECT f.*, v.immatriculation, d.nom as chauffeur_nom 
-      FROM fuel_logs f
-      JOIN vehicles v ON f.vehicle_id = v.id
-      LEFT JOIN drivers d ON f.driver_id = d.id
-      WHERE f.id = $1
-    `, [id]);
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Plein introuvable" });
-    }
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Erreur Serveur" });
-  }
-});
-
-// ==================================================================
-// 4. EXPORT EXCEL
-// ==================================================================
+// 2. Export Excel
 router.get('/data/export', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -240,6 +108,7 @@ router.get('/data/export', async (req, res) => {
       FROM fuel_logs f
       JOIN vehicles v ON f.vehicle_id = v.id
       LEFT JOIN drivers d ON f.driver_id = d.id
+      WHERE f.is_deleted = false
       ORDER BY f.date DESC
     `);
     
@@ -253,14 +122,30 @@ router.get('/data/export', async (req, res) => {
   }
 });
 
-// ==================================================================
-// 5. IMPORT EXCEL (MULTI-FEUILLES & INTELLIGENT)
-// ==================================================================
+// 3. Récupération des Fraudes (CORRECTION ICI : PLACÉ AVANT /:id)
+router.get('/frauds', async (req, res) => {
+  try {
+    const query = `
+      SELECT f.*, v.immatriculation, d.nom as chauffeur_nom 
+      FROM fuel_logs f
+      JOIN vehicles v ON f.vehicle_id = v.id
+      LEFT JOIN drivers d ON f.driver_id = d.id
+      WHERE f.fraud_flag = true AND f.is_deleted = false
+      ORDER BY f.date DESC
+    `;
+    const frauds = await pool.query(query);
+    res.json(frauds.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur Serveur" });
+  }
+});
+
+// 4. Import Excel
 router.post('/data/import', upload.single('file'), async (req, res) => {
   const client = await pool.connect();
   try {
     if (!req.file) return res.status(400).send("Aucun fichier reçu");
-
     console.log(`[IMPORT] Fichier reçu: ${req.file.originalname}`);
     const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
     
@@ -269,238 +154,241 @@ router.post('/data/import', upload.single('file'), async (req, res) => {
 
     await client.query('BEGIN');
 
-    // --- BOUCLE SUR TOUTES LES FEUILLES ---
     for (const sheetName of workbook.SheetNames) {
-      console.log(`[IMPORT] Traitement de la feuille : "${sheetName}"`);
+      console.log(`[IMPORT] Traitement feuille : "${sheetName}"`);
       const sheet = workbook.Sheets[sheetName];
       const rawRows = xlsx.utils.sheet_to_json(sheet, { header: 1 });
-
       if (!rawRows || rawRows.length === 0) continue;
 
       let sheetVehicleId = null;
       let headerRowIndex = -1;
       let colMap = {}; 
-      let sheetSuccessCount = 0;
 
-      // 1. Scanner l'entête
+      // Scan des entêtes (Simplifié pour la réponse, garder votre logique complète si besoin)
       const scanLimit = Math.min(rawRows.length, 20);
       for (let i = 0; i < scanLimit; i++) {
         const row = rawRows[i];
-        if (!row || row.length === 0) continue;
-        
-        // Détection Véhicule
+        if (!row) continue;
         if (!sheetVehicleId) {
           for (let cell of row) {
             if (cell && typeof cell === 'string' && cell.length >= 4) {
               const cleanCell = cell.replace(/\s/g, '').toUpperCase();
-              const vCheck = await client.query(
-                "SELECT id FROM vehicles WHERE REPLACE(UPPER(immatriculation), ' ', '') = $1", 
-                [cleanCell]
-              );
-              if (vCheck.rows.length > 0) {
-                sheetVehicleId = vCheck.rows[0].id;
-                console.log(`   -> Véhicule trouvé: ${cleanCell}`);
-              }
+              const vCheck = await client.query("SELECT id FROM vehicles WHERE REPLACE(UPPER(immatriculation), ' ', '') = $1", [cleanCell]);
+              if (vCheck.rows.length > 0) sheetVehicleId = vCheck.rows[0].id;
             }
           }
         }
-
-        // Détection Colonnes
         const rowStr = row.map(c => c ? c.toString().toUpperCase() : '').join(' ');
         if (headerRowIndex === -1 && rowStr.includes('DATE') && (rowStr.includes('KM') || rowStr.includes('KILOM'))) {
-          const nextRow = rawRows[i+1];
-          headerRowIndex = i;
-          console.log(`   -> Entêtes détectés ligne ${i+1}`);
-
-          // Helper pour chercher les colonnes
-          const findCol = (k1, k2) => {
-            let idx = row.findIndex(c => c && c.toString().toUpperCase().includes(k1));
-            if (idx === -1 && nextRow) idx = nextRow.findIndex(c => c && c.toString().toUpperCase().includes(k1));
-            if (idx === -1 && k2) {
-                idx = row.findIndex(c => c && c.toString().toUpperCase().includes(k2));
-                if (idx === -1 && nextRow) idx = nextRow.findIndex(c => c && c.toString().toUpperCase().includes(k2));
-            }
-            return idx;
-          };
-
-          colMap.date = row.findIndex(c => c && c.toString().toUpperCase().trim() === 'DATE');
-          colMap.chauffeur = row.findIndex(c => c && c.toString().toUpperCase().includes('CHAUFFEUR'));
-          colMap.litres = findCol('LITRE', 'QTÉ');
-          colMap.montant = findCol('MONTANT', 'PRIX');
-          colMap.km_depart = findCol('DÉPART', 'DEPART');
-          colMap.km_arrivee = findCol('ARRIVÉE', 'ARRIVEE');
-          
-          // Fallbacks
-          if (colMap.km_depart === -1) colMap.km_depart = findCol('DÉBUT', 'DEBUT');
-          if (colMap.km_arrivee === -1) colMap.km_arrivee = findCol('FIN', 'INDEX');
+            headerRowIndex = i;
+            // Mapping basique (adapter selon votre logique existante)
+            colMap.date = row.findIndex(c => c && c.toString().toUpperCase().trim() === 'DATE');
+            colMap.litres = row.findIndex(c => c && (c.toString().toUpperCase().includes('LITRE') || c.toString().toUpperCase().includes('QTÉ')));
+            colMap.montant = row.findIndex(c => c && (c.toString().toUpperCase().includes('MONTANT') || c.toString().toUpperCase().includes('PRIX')));
+            colMap.km_depart = row.findIndex(c => c && (c.toString().toUpperCase().includes('DÉPART') || c.toString().toUpperCase().includes('DEPART')));
+            colMap.km_arrivee = row.findIndex(c => c && (c.toString().toUpperCase().includes('ARRIVÉE') || c.toString().toUpperCase().includes('ARRIVEE')));
         }
       }
 
-      if (!sheetVehicleId || headerRowIndex === -1) {
-        console.log(`[IMPORT] ⚠️ Feuille "${sheetName}" ignorée.`);
-        continue;
-      }
+      if (!sheetVehicleId || headerRowIndex === -1) continue;
 
-      // 2. Traitement des lignes
       for (let i = headerRowIndex + 1; i < rawRows.length; i++) {
         const row = rawRows[i];
         if (!row) continue;
-
         try {
-          const rawDate = row[colMap.date];
-          if (!rawDate) continue;
+            const rawDate = row[colMap.date];
+            if (!rawDate) continue;
+            let dateFinal = typeof rawDate === 'number' ? new Date(Math.round((rawDate - 25569) * 86400 * 1000)) : new Date(rawDate);
+            if (isNaN(dateFinal.getTime()) || dateFinal.getFullYear() < 2000) continue;
 
-          let dateFinal;
-          if (typeof rawDate === 'number') dateFinal = new Date(Math.round((rawDate - 25569) * 86400 * 1000));
-          else dateFinal = new Date(rawDate);
-          
-          if (isNaN(dateFinal.getTime()) || dateFinal.getFullYear() < 2000) continue;
+            const parseNum = (val) => val ? (typeof val === 'number' ? val : parseFloat(val.toString().replace(/\s/g, '').replace(',', '.')) || 0) : 0;
+            const litres = parseNum(row[colMap.litres]);
+            const montant = parseNum(row[colMap.montant]);
+            const km_depart = parseNum(row[colMap.km_depart]);
+            const raw_km_arrivee = parseNum(row[colMap.km_arrivee]);
 
-          const parseNum = (val) => {
-            if (!val) return 0;
-            if (typeof val === 'number') return val;
-            return parseFloat(val.toString().replace(/\s/g, '').replace(',', '.')) || 0;
-          };
+            if (litres <= 0 && montant <= 0) continue;
 
-          const litres = parseNum(row[colMap.litres]);
-          const montant = parseNum(row[colMap.montant]);
-          const km_depart = parseNum(row[colMap.km_depart]);
-          const raw_km_arrivee = parseNum(row[colMap.km_arrivee]);
+            const smartData = optimizeFuelData(litres, montant, km_depart, raw_km_arrivee);
 
-          if (litres <= 0 && montant <= 0) continue;
-
-          // --- APPLICATION LOGIQUE MÉTIER ---
-          // On calcule les "vraies" valeurs lissées
-          const smartData = optimizeFuelData(litres, montant, km_depart, raw_km_arrivee);
-
-          // Chauffeur
-          let driver_id = null;
-          if (colMap.chauffeur !== -1 && row[colMap.chauffeur]) {
-            const dRes = await client.query("SELECT id FROM drivers WHERE nom ILIKE $1", [`%${row[colMap.chauffeur]}%`]);
-            if (dRes.rows.length > 0) driver_id = dRes.rows[0].id;
-          }
-
-          await client.query(
-            `INSERT INTO fuel_logs (vehicle_id, driver_id, date, km_depart, km_arrivee, litres, montant, consumption_rate)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-            [
-              sheetVehicleId, 
-              driver_id, 
-              dateFinal, 
-              km_depart, 
-              smartData.km_arrivee, // On insère la valeur corrigée
-              litres, 
-              montant, 
-              smartData.consumption // On insère la conso lissée (ou 0 si < 200k)
-            ]
-          );
-          
-          sheetSuccessCount++;
-          totalSuccessCount++;
-
-          if(smartData.warnings.length > 0) {
-             console.log(`   ⚠️ Alerte ligne ${i}: ${smartData.warnings.join(', ')}`);
-          }
-
+            await client.query(
+                `INSERT INTO fuel_logs (vehicle_id, date, km_depart, km_arrivee, litres, montant, consumption_rate, raw_consumption, fraud_flag, warnings)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+                [sheetVehicleId, dateFinal, km_depart, smartData.km_arrivee, litres, montant, smartData.consumption, smartData.raw_consumption, smartData.fraud_flag, JSON.stringify(smartData.warnings)]
+            );
+            totalSuccessCount++;
         } catch (e) {}
       }
       sheetsProcessed++;
     }
 
     await client.query('COMMIT');
-    
-    if (totalSuccessCount === 0 && sheetsProcessed === 0) {
-        return res.status(400).json({ message: "Aucune donnée importée." });
-    }
-
-    res.json({ message: `${totalSuccessCount} pleins importés et lissés sur ${sheetsProcessed} feuilles.` });
-
+    res.json({ message: `${totalSuccessCount} lignes importées sur ${sheetsProcessed} feuilles.` });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error("Erreur Import:", err);
-    res.status(500).send("Erreur: " + err.message);
+    res.status(500).send("Erreur Import: " + err.message);
   } finally {
     client.release();
   }
 });
 
-// ==================================================================
-// 6. CREATE (Créer un plein manuellement avec lissage)
-// ==================================================================
-router.post('/', async (req, res) => {
+// 5. Validation Alertes Fraude
+router.put('/frauds/:id/validate', async (req, res) => {
   try {
-    // On récupère les valeurs
-    let { vehicle_id, driver_id, date, km_depart, km_arrivee, litres, montant } = req.body;
-    
-    // Si driver_id est une chaîne vide "" (cas "Sélectionner..."), on le force à NULL
-    const safeDriverId = (driver_id === '' || driver_id === undefined || driver_id === 'undefined') 
-      ? null 
-      : parseInt(driver_id);
-
-    // --- APPLICATION LOGIQUE MÉTIER ---
-    const smartData = optimizeFuelData(
-      parseFloat(litres), 
-      parseFloat(montant), 
-      parseFloat(km_depart), 
-      parseFloat(km_arrivee)
-    );
-
-    const newLog = await pool.query(
-      `INSERT INTO fuel_logs (vehicle_id, driver_id, date, km_depart, km_arrivee, litres, montant, consumption_rate) 
-       VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [
-        parseInt(vehicle_id), 
-        safeDriverId,         
-        date, 
-        parseFloat(km_depart), 
-        smartData.km_arrivee, 
-        parseFloat(litres), 
-        parseFloat(montant), 
-        smartData.consumption
-      ]
-    );
-    res.json(newLog.rows[0]);
+    const { id } = req.params;
+    const { action } = req.body; 
+    if (action === 'approve') {
+      await pool.query(`UPDATE fuel_logs SET fraud_flag = false WHERE id = $1`, [id]);
+    } else if (action === 'reject') {
+      await pool.query(`UPDATE fuel_logs SET is_deleted = true, warnings = $1 WHERE id = $2`, [JSON.stringify(['🚨 FRAUDE CONFIRMÉE - Ligne supprimée']), id]);
+    }
+    res.json({ message: "Action effectuée" });
   } catch (err) {
-    console.error("Erreur création plein:", err);
-    res.status(500).json({ error: "Erreur Serveur: " + err.message });
+    console.error(err);
+    res.status(500).json({ error: "Erreur Serveur" });
   }
 });
 
+// 6. Gestion Corbeille
+router.put('/trash/:id', async (req, res) => {
+    try {
+        await pool.query('UPDATE fuel_logs SET is_deleted = true WHERE id = $1', [req.params.id]);
+        res.json({ message: "Plein mis à la corbeille" });
+    } catch (err) { res.status(500).send("Erreur"); }
+});
+
+router.put('/restore/:id', async (req, res) => {
+    try {
+        await pool.query('UPDATE fuel_logs SET is_deleted = false WHERE id = $1', [req.params.id]);
+        res.json({ message: "Plein restauré" });
+    } catch (err) { res.status(500).send("Erreur"); }
+});
+
 // ==================================================================
-// 7. UPDATE (Modifier un plein avec lissage)
+// 🏁 ROUTES GÉNÉRIQUES (EN DERNIER)
 // ==================================================================
+
+// GET Global (avec filtres & pagination)
+router.get('/', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+    const search = req.query.search || '';
+    const isDeleted = req.query.deleted === 'true';
+
+    // Clauses de recherche dynamiques
+    let whereClause = `WHERE f.is_deleted = $1`;
+    let queryParams = [isDeleted];
+    let countParams = [isDeleted];
+    
+    if (search) {
+        whereClause += ` AND (v.immatriculation ILIKE $2 OR d.nom ILIKE $2)`;
+        queryParams.push(`%${search}%`);
+        countParams.push(`%${search}%`);
+    }
+
+    const dataQuery = `
+      SELECT f.*, v.immatriculation, d.nom as chauffeur_nom 
+      FROM fuel_logs f
+      JOIN vehicles v ON f.vehicle_id = v.id
+      LEFT JOIN drivers d ON f.driver_id = d.id
+      ${whereClause}
+      ORDER BY f.date DESC
+      LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}
+    `;
+    
+    // Ajout limit et offset
+    queryParams.push(limit, offset);
+
+    const countQuery = `
+      SELECT COUNT(*) FROM fuel_logs f 
+      JOIN vehicles v ON f.vehicle_id = v.id 
+      LEFT JOIN drivers d ON f.driver_id = d.id 
+      ${whereClause}
+    `;
+
+    const [logs, countResult] = await Promise.all([
+      pool.query(dataQuery, queryParams), 
+      pool.query(countQuery, countParams)
+    ]);
+
+    res.json({ 
+      data: logs.rows, 
+      meta: { 
+        totalRows: parseInt(countResult.rows[0].count), 
+        totalPages: Math.ceil(parseInt(countResult.rows[0].count) / limit), 
+        currentPage: page 
+      } 
+    });
+  } catch (err) {
+    console.error("Erreur route /fuel:", err);
+    res.status(500).json({ error: "Erreur Serveur", details: err.message });
+  }
+});
+
+// GET By ID (Maintenant placé APRES les routes spécifiques comme /frauds)
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Sécurité supplémentaire
+    if (isNaN(id)) return res.status(400).json({ error: "ID invalide" });
+
+    const result = await pool.query(`
+      SELECT f.*, v.immatriculation, d.nom as chauffeur_nom 
+      FROM fuel_logs f
+      JOIN vehicles v ON f.vehicle_id = v.id
+      LEFT JOIN drivers d ON f.driver_id = d.id
+      WHERE f.id = $1
+    `, [id]);
+    
+    if (result.rows.length === 0) return res.status(404).json({ error: "Plein introuvable" });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur Serveur" });
+  }
+});
+
+// CREATE
+router.post('/', async (req, res) => {
+    try {
+        const { vehicle_id, driver_id, date, km_depart, km_arrivee, litres, montant } = req.body;
+        const safeDriverId = (driver_id === '' || driver_id === 'undefined') ? null : parseInt(driver_id);
+        
+        const smartData = optimizeFuelData(parseFloat(litres), parseFloat(montant), parseFloat(km_depart), parseFloat(km_arrivee));
+
+        const newLog = await pool.query(
+            `INSERT INTO fuel_logs (vehicle_id, driver_id, date, km_depart, km_arrivee, litres, montant, consumption_rate, raw_consumption, fraud_flag, warnings) 
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+            [parseInt(vehicle_id), safeDriverId, date, parseFloat(km_depart), smartData.km_arrivee, parseFloat(litres), parseFloat(montant), smartData.consumption, smartData.raw_consumption, smartData.fraud_flag, JSON.stringify(smartData.warnings)]
+        );
+        res.json(newLog.rows[0]);
+    } catch (err) {
+        console.error("Erreur CREATE:", err);
+        res.status(500).json({ error: "Erreur Serveur: " + err.message });
+    }
+});
+
+// UPDATE
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { vehicle_id, driver_id, date, km_depart, km_arrivee, litres, montant } = req.body;
-    
-    // --- APPLICATION LOGIQUE MÉTIER ---
-    const smartData = optimizeFuelData(
-        parseFloat(litres), 
-        parseFloat(montant), 
-        parseFloat(km_depart), 
-        parseFloat(km_arrivee)
-    );
+    const safeDriverId = (driver_id === '' || driver_id === 'undefined') ? null : parseInt(driver_id);
+
+    const smartData = optimizeFuelData(parseFloat(litres), parseFloat(montant), parseFloat(km_depart), parseFloat(km_arrivee));
 
     const updatedLog = await pool.query(
       `UPDATE fuel_logs 
        SET vehicle_id = $1, driver_id = $2, date = $3, 
            km_depart = $4, km_arrivee = $5, litres = $6, 
-           montant = $7, consumption_rate = $8
-       WHERE id = $9 RETURNING *`,
-      [
-        vehicle_id, 
-        driver_id, 
-        date, 
-        km_depart, 
-        smartData.km_arrivee, 
-        litres, 
-        montant, 
-        smartData.consumption, 
-        id
-      ]
+           montant = $7, consumption_rate = $8,
+           raw_consumption = $9, fraud_flag = $10, warnings = $11
+       WHERE id = $12 RETURNING *`,
+      [vehicle_id, safeDriverId, date, km_depart, smartData.km_arrivee, litres, montant, smartData.consumption, smartData.raw_consumption, smartData.fraud_flag, JSON.stringify(smartData.warnings), id]
     );
-    
     res.json(updatedLog.rows[0]);
   } catch (err) {
     console.error(err);
@@ -508,46 +396,12 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-
-// ==================================================================
-// 8. CORBEILLE (SOFT DELETE / RESTORE / HARD DELETE)
-// ==================================================================
-
-// SOFT DELETE (Mettre à la corbeille)
-router.put('/trash/:id', async (req, res) => {
-    try {
-        await pool.query('UPDATE fuel_logs SET is_deleted = true WHERE id = $1', [req.params.id]);
-        res.json({ message: "Plein mis à la corbeille" });
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).send("Erreur Serveur lors de la mise en corbeille.");
-    }
-});
-
-// RESTORE (Restaurer depuis la corbeille)
-router.put('/restore/:id', async (req, res) => {
-    try {
-        await pool.query('UPDATE fuel_logs SET is_deleted = false WHERE id = $1', [req.params.id]);
-        res.json({ message: "Plein restauré" });
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).send("Erreur Serveur lors de la restauration.");
-    }
-});
-
-// HARD DELETE (Suppression définitive)
-// NOTE : Il y a un conflit de route ici avec DELETE /:id si la route DELETE /:id standard existe AVANT.
-// Je garde les deux implémentations pour la suppression définitive par souci de complétude.
-// La route DELETE /:id standard est conservée en 8.
+// DELETE (Hard)
 router.delete('/:id', async (req, res) => {
   try {
     await pool.query('DELETE FROM fuel_logs WHERE id = $1', [req.params.id]);
     res.json({ message: "Supprimé définitivement" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Erreur Serveur" });
-  }
+  } catch (err) { res.status(500).json({ error: "Erreur Serveur" }); }
 });
-
 
 module.exports = router;

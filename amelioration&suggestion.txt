@@ -1,3 +1,8 @@
+User: admin
+
+MDP: NavAdmin
+
+
 Idées d'Amélioration & Suggestions
 Voici des propositions classées par catégorie, allant de la dette technique aux fonctionnalités innovantes.
 
